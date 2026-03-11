@@ -1,3 +1,6 @@
+import http from "node:http";
+import https from "node:https";
+
 import { EmbyServerProfile } from "./config.js";
 
 export interface SessionOccupancyResult {
@@ -274,27 +277,8 @@ export async function checkMediaOccupied(params: {
     endpoint.searchParams.set("api_key", params.apiKey);
   }
 
-  const response = await fetch(endpoint.toString(), {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      ...(params.apiKey ? { "x-emby-token": params.apiKey } : {})
-    }
-  });
-  if (!response.ok) {
-    return {
-      occupied: false,
-      matchedSessionId: "",
-      matchedUserId: "",
-      totalSessions: 0,
-      playableSessions: 0,
-      filteredPaused: 0,
-      filteredNoNowPlaying: 0
-    };
-  }
-
-  const payload = (await response.json()) as unknown;
-  if (!Array.isArray(payload)) {
+  const payload = await requestSessionsPayload(endpoint, params.apiKey);
+  if (!payload) {
     return {
       occupied: false,
       matchedSessionId: "",
@@ -464,21 +448,71 @@ async function fetchSessionsPayload(server: EmbyServerProfile, apiKey: string): 
     endpoint.searchParams.set("api_key", apiKey);
   }
 
-  const response = await fetch(endpoint.toString(), {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      ...(apiKey ? { "x-emby-token": apiKey } : {})
-    }
-  });
-  if (!response.ok) {
-    return null;
-  }
-
-  const payload = (await response.json()) as unknown;
-  return Array.isArray(payload) ? payload : null;
+  return requestSessionsPayload(endpoint, apiKey);
 }
 
 async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestSessionsPayload(endpoint: URL, apiKey: string): Promise<unknown[] | null> {
+  const payload = await requestJson(endpoint, {
+    method: "GET",
+    headers: {
+      accept: "application/json",
+      "accept-encoding": "identity",
+      ...(apiKey ? { "x-emby-token": apiKey } : {})
+    }
+  });
+  return Array.isArray(payload) ? payload : null;
+}
+
+async function requestJson(
+  endpoint: URL,
+  options: {
+    method: "GET";
+    headers: Record<string, string>;
+  }
+): Promise<unknown | null> {
+  const client = endpoint.protocol === "https:" ? https : http;
+
+  return await new Promise((resolve, reject) => {
+    const req = client.request(endpoint, {
+      method: options.method,
+      headers: options.headers
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      res.on("end", () => {
+        const statusCode = res.statusCode ?? 0;
+        if (statusCode < 200 || statusCode >= 300) {
+          resolve(null);
+          return;
+        }
+        const text = Buffer.concat(chunks).toString("utf8");
+        if (!text.trim()) {
+          resolve(null);
+          return;
+        }
+        try {
+          resolve(JSON.parse(text));
+        } catch (error) {
+          reject(error);
+        }
+      });
+      res.on("error", (error) => {
+        reject(error);
+      });
+    });
+
+    req.setTimeout(15000, () => {
+      req.destroy(new Error(`session request timeout: ${endpoint.toString()}`));
+    });
+    req.on("error", (error) => {
+      reject(error);
+    });
+    req.end();
+  });
 }

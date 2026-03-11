@@ -1131,6 +1131,7 @@ function buildUpstreamHeaders(
   config: AppConfig
 ): Record<string, string> {
   const result: Record<string, string> = {};
+  result["accept-encoding"] = "identity";
   const rangeValue = headers.range;
   if (typeof rangeValue === "string" && rangeValue.trim()) {
     result.range = rangeValue;

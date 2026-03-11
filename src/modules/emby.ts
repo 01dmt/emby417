@@ -1,3 +1,6 @@
+import http from "node:http";
+import https from "node:https";
+
 import { AppConfig, getActiveEmbyServer, getEmbyServerById } from "./config.js";
 
 export interface EmbySourceHint {
@@ -223,7 +226,7 @@ async function fetchItemInfo(
       endpoint.searchParams.set("api_key", apiKey);
     }
 
-    const response = await fetch(endpoint, {
+    const payload = await requestJson(endpoint, {
       method: "GET",
       headers: {
         accept: "application/json",
@@ -231,11 +234,9 @@ async function fetchItemInfo(
         ...(apiKey ? { "x-emby-token": apiKey } : {})
       }
     });
-    if (!response.ok) {
+    if (!payload) {
       continue;
     }
-
-    const payload = (await response.json()) as unknown;
     const item = extractItemPayload(payload);
     if (item) {
       return item;
@@ -275,7 +276,11 @@ async function fetchPlaybackInfo(
       }
 
       const requestHeaders = buildPlaybackInfoHeaders(token, headers);
-      const requestInit: RequestInit = {
+      const requestInit: {
+        method: "GET" | "POST";
+        headers: Record<string, string>;
+        body?: string;
+      } = {
         method,
         headers: requestHeaders
       };
@@ -291,11 +296,7 @@ async function fetchPlaybackInfo(
         });
       }
 
-      const response = await fetch(endpoint, requestInit);
-      if (!response.ok) {
-        continue;
-      }
-      const payload = (await response.json()) as unknown;
+      const payload = await requestJson(endpoint, requestInit);
       if (!payload || typeof payload !== "object") {
         continue;
       }
@@ -417,5 +418,59 @@ function readMediaSources(value: unknown): Array<Record<string, unknown>> {
   }
   return value.filter((item): item is Record<string, unknown> => {
     return Boolean(item) && typeof item === "object";
+  });
+}
+
+async function requestJson(
+  endpoint: URL,
+  options: {
+    method: "GET" | "POST";
+    headers: Record<string, string>;
+    body?: string;
+  }
+): Promise<unknown | null> {
+  const client = endpoint.protocol === "https:" ? https : http;
+
+  return await new Promise((resolve, reject) => {
+    const req = client.request(endpoint, {
+      method: options.method,
+      headers: options.headers
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      res.on("end", () => {
+        const statusCode = res.statusCode ?? 0;
+        if (statusCode < 200 || statusCode >= 300) {
+          resolve(null);
+          return;
+        }
+        const text = Buffer.concat(chunks).toString("utf8");
+        if (!text.trim()) {
+          resolve(null);
+          return;
+        }
+        try {
+          resolve(JSON.parse(text));
+        } catch (error) {
+          reject(error);
+        }
+      });
+      res.on("error", (error) => {
+        reject(error);
+      });
+    });
+
+    req.setTimeout(15000, () => {
+      req.destroy(new Error(`emby request timeout: ${endpoint.toString()}`));
+    });
+    req.on("error", (error) => {
+      reject(error);
+    });
+    if (typeof options.body === "string" && options.body.length > 0) {
+      req.write(options.body);
+    }
+    req.end();
   });
 }

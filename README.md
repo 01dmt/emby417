@@ -13,7 +13,7 @@ curl -sL https://raw.githubusercontent.com/01dmt/emby417/main/docker-compose.yml
 docker compose up -d
 ```
 
-访问管理台配置 Cookie：`http://127.0.0.1:8417/admin/`
+访问管理台配置 Cookie：`http://你的NAS或服务器IP:8417/admin/`
 
 ## 🐳 Docker 部署
 
@@ -61,7 +61,7 @@ services:
 
 ## ⚙️ 首次配置
 
-1. 启动容器后访问 `http://127.0.0.1:8417/admin/`
+1. 启动容器后访问 `http://你的NAS或服务器IP:8417/admin/`
 2. 在管理后台配置 115 Cookie（获取方法：登录 115 网页版 → F12 → Application → Cookies）
 3. 保存后即可使用
 

@@ -41,7 +41,6 @@ ENV APP_LOG_DIR=/data/logs
 ENV CADDYFILE_PATH=/data/Caddyfile.local
 ENV XDG_DATA_HOME=/data
 ENV XDG_CONFIG_HOME=/data
-ENV CANONICAL_HOST=127.0.0.1
 
 VOLUME ["/data"]
 

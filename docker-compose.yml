@@ -5,11 +5,11 @@ services:
     restart: unless-stopped
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      CANONICAL_HOST: ${CANONICAL_HOST:-127.0.0.1}
     ports:
       - "${WEB_UI_PORT:-8417}:8417"
-      - "5088:5088"
-      - "5089:5089"
+      # 按你的 Emby 反代端口自行放行，例如：
+      # - "5088:5088"
+      # - "5089:5089"
     volumes:
       - ./data:/data
 
@@ -19,5 +19,7 @@ services:
 #
 # .env 示例：
 # WEB_UI_PORT=8417
-# CANONICAL_HOST=127.0.0.1
 # TZ=Asia/Shanghai
+#
+# 如果需要固定访问域名再按需配置：
+# CANONICAL_HOST=your.domain.or.ip

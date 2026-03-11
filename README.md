@@ -22,7 +22,7 @@ docker compose up -d
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `WEB_UI_PORT` | 8417 | 管理台端口 |
-| `CANONICAL_HOST` | 127.0.0.1 | 规范访问域名，设置后会把其他 Host 308 跳转到该域名 |
+| `CANONICAL_HOST` | 空 | 规范访问域名；设置后会把其他 Host 308 跳转到该域名 |
 | `TZ` | Asia/Shanghai | 时区 |
 
 ### 启动
@@ -46,14 +46,18 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
-      CANONICAL_HOST: 127.0.0.1
     ports:
-      - "8417:8417"  # 管理台
-      - "5088:5088"  # HTTP 代理
-      - "5089:5089"  # HTTPS 代理
+      - "8417:8417"  # 管理台，可改成 "9000:8417"
+      # Emby 反代端口按你自己的入口配置自行放行，例如：
+      # - "5088:5088"
+      # - "5089:5089"
     volumes:
       - ./data:/data
 ```
+
+`CANONICAL_HOST` 的作用：
+- 留空时不做域名跳转，适合大多数部署场景。
+- 设置后会把 `localhost`、`127.0.0.1` 或其他 Host 统一 308 跳转到你指定的域名/IP。
 
 ## ⚙️ 首次配置
 

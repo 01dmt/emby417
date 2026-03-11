@@ -11,8 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  auto-tag:
-    if: github.ref == 'refs/heads/main'
+  docker:
     runs-on: ubuntu-latest
 
     steps:
@@ -20,39 +19,41 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Create Next Version Tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve Version Tag
+        id: version
+        shell: bash
         run: |
-          git fetch --tags --force
-          latest_tag=$(git tag --list 'v*' --sort=-version:refname | head -n 1)
-
-          if [ -z "$latest_tag" ]; then
-            next_tag="v1.0"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version_tag="${GITHUB_REF_NAME}"
           else
-            version="${latest_tag#v}"
-            major="${version%%.*}"
-            minor="${version##*.}"
-            if ! [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]]; then
-              echo "Unsupported tag format: $latest_tag"
-              exit 1
+            git fetch --tags --force
+            latest_tag=$(git tag --list 'v*' --sort=-version:refname | head -n 1)
+
+            if [[ -z "$latest_tag" ]]; then
+              version_tag="v1.0"
+            else
+              version="${latest_tag#v}"
+              major="${version%%.*}"
+              minor="${version##*.}"
+              if ! [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]]; then
+                echo "Unsupported tag format: $latest_tag"
+                exit 1
+              fi
+              next_minor=$((minor + 1))
+              version_tag="v${major}.${next_minor}"
             fi
-            next_minor=$((minor + 1))
-            next_tag="v${major}.${next_minor}"
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if git rev-parse "$version_tag" >/dev/null 2>&1; then
+              echo "Tag already exists: $version_tag"
+            else
+              git tag "$version_tag"
+              git push origin "$version_tag"
+            fi
           fi
 
-          echo "Creating tag: $next_tag"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "$next_tag"
-          git push origin "$next_tag"
-
-  docker:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
+          echo "version_tag=$version_tag" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -68,12 +69,12 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=raw,value=${{ github.ref_name }}
+            type=raw,value=${{ steps.version.outputs.version_tag }}
             type=raw,value=latest
           labels: |
             org.opencontainers.image.title=emby417
             org.opencontainers.image.description=Emby 302 proxy with p115client integration and admin UI
-            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version_tag }}
             org.opencontainers.image.source=https://github.com/01dmt/emby417
 
       - uses: docker/build-push-action@v6

@@ -1,0 +1,10 @@
+node_modules
+dist
+logs
+data
+docker-data
+tmp-*.log
+run-*.log
+bridge/__pycache__
+.git
+.gitignore

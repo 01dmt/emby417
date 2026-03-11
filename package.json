@@ -1,0 +1,24 @@
+{
+  "name": "emby-302-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Emby 302 proxy with p115client integration and admin UI",
+  "scripts": {
+    "dev": "node --watch dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "clean:logs": "node scripts/cleanup-logs.cjs",
+    "bridge:deps": "python -m pip install -r bridge/requirements.txt",
+    "bridge:start": "python -m uvicorn bridge.app:app --host 127.0.0.1 --port 8115"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@fastify/static": "^6.12.0",
+    "fastify": "^4.26.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Emby 302 管理台</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <p class="eyebrow">Emby 302 Proxy</p>
+          <h1>管理台</h1>
+        </div>
+        <nav class="menu" id="menu">
+          <button type="button" class="menu-item active" data-section="home">主页</button>
+          <button type="button" class="menu-item" data-section="logs">日志</button>
+          <button type="button" class="menu-item" data-section="emby">Emby配置</button>
+          <button type="button" class="menu-item" data-section="p115">cookies配置</button>
+          <button type="button" class="menu-item" data-section="users">用户管理</button>
+          <button type="button" class="menu-item" data-section="playback">用户302配置</button>
+          <button type="button" class="menu-item" data-section="cache">缓存管理</button>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <section class="panel" data-panel="home">
+          <header class="panel-header">
+            <div>
+              <h2>主页</h2>
+              <p class="lead">查看运行状态，快速确认服务健康情况。</p>
+            </div>
+          </header>
+          <div class="status" id="status-card">
+            <div>
+              <span>运行时长</span>
+              <strong id="status-uptime">--</strong>
+            </div>
+            <div>
+              <span>缓存条目</span>
+              <strong id="status-cache">--</strong>
+            </div>
+            <div>
+              <span>日志条目</span>
+              <strong id="status-logs">--</strong>
+            </div>
+            <div>
+              <span>Cookies 数</span>
+              <strong id="status-cookies">--</strong>
+            </div>
+            <div>
+              <span>用户数</span>
+              <strong id="status-users">--</strong>
+            </div>
+            <div>
+              <span>秒传成功次数</span>
+              <strong id="status-transfer-success">--</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel hidden" data-panel="logs">
+          <header class="panel-header">
+            <div>
+              <h2>实时日志监控</h2>
+              <p class="lead">实时查看请求、Headers、路径解析与302重定向等运行日志。</p>
+            </div>
+            <div class="logs-toolbar">
+              <div class="logs-actions">
+                <input id="logs-filter" type="search" placeholder="筛选日志关键字" />
+                <button type="button" id="logs-clear">清空日志</button>
+                <button type="button" id="logs-view-all">查看全部</button>
+              </div>
+            </div>
+          </header>
+          <section class="card full">
+            <div class="logs" id="logs"></div>
+          </section>
+        </section>
+
+        <section class="panel hidden" data-panel="emby">
+          <header class="panel-header">
+            <div>
+              <h2>Emby服务器</h2>
+              <p class="lead">管理多套 Emby 连接与反代参数，支持按服务器独立启用与路径替换规则。</p>
+            </div>
+            <div class="panel-tools emby-global-actions">
+              <button type="button" id="add-emby-server">+ 添加配置</button>
+              <button type="button" id="save-emby-config" class="primary-action">保存更改</button>
+            </div>
+          </header>
+          <section class="card">
+            <div id="emby-servers"></div>
+            <p class="hint" id="emby-save-hint"></p>
+          </section>
+        </section>
+
+        <section class="panel hidden" data-panel="cache">
+          <header class="panel-header">
+            <div>
+              <h2>缓存列表</h2>
+              <p class="lead">查看缓存路径、直链与请求头，支持分页浏览。</p>
+            </div>
+            <div class="panel-tools">
+              <button type="button" id="cache-clear">清空缓存</button>
+            </div>
+          </header>
+          <section class="card full">
+            <div class="table-wrap">
+              <table class="cache-table">
+                <thead>
+                  <tr>
+                    <th>缓存路径</th>
+                    <th>重定向 URL</th>
+                    <th>创建时间</th>
+                    <th>有效期</th>
+                    <th>请求头</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="cache-table-body"></tbody>
+              </table>
+            </div>
+            <div class="cache-pagination">
+              <div class="cache-page-size">
+                <span>每页</span>
+                <select id="cache-page-size">
+                  <option value="10">10</option>
+                  <option value="20" selected>20</option>
+                  <option value="50">50</option>
+                </select>
+                <span>条</span>
+              </div>
+              <div class="cache-page-controls">
+                <button type="button" id="cache-prev">上一页</button>
+                <span id="cache-page-info">第 1 页 / 共 1 页</span>
+                <button type="button" id="cache-next">下一页</button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel hidden" data-panel="users">
+          <header class="panel-header">
+            <div>
+              <h2>用户管理</h2>
+              <p class="lead">显示当前 Emby 服务器现存用户。</p>
+            </div>
+            <div class="panel-tools">
+              <button type="button" id="refresh-users">刷新用户</button>
+            </div>
+          </header>
+          <section class="card full">
+            <p class="hint" id="users-meta"></p>
+            <div class="table-wrap">
+              <table class="cache-table">
+                <thead>
+                  <tr>
+                    <th>用户名</th>
+                    <th>ID</th>
+                    <th>管理员</th>
+                    <th>禁用</th>
+                    <th>有密码</th>
+                    <th>最后活跃时间</th>
+                  </tr>
+                </thead>
+                <tbody id="users-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel hidden" data-panel="p115">
+          <header class="panel-header">
+            <div>
+              <h2>115cookies配置</h2>
+              <p class="lead">cookies和秒传cache配置。</p>
+            </div>
+            <div class="panel-tools p115-global-actions">
+              <button type="button" id="add-cookie-profile">新增配置</button>
+              <button type="button" id="save-115-config" class="primary-action">保存更改</button>
+            </div>
+          </header>
+          <section class="card">
+            <form id="config-form">
+              <div id="cookie-profiles"></div>
+              <p class="hint" id="save-hint"></p>
+            </form>
+          </section>
+        </section>
+
+        <section class="panel hidden" data-panel="playback">
+          <header class="panel-header">
+            <div>
+              <h2>用户302配置</h2>
+              <p class="lead">匹配播放用户后自动执行跨账号秒传，并将目标账号直链返回给该用户。</p>
+            </div>
+            <div class="panel-tools">
+              <button type="button" id="add-user302-rule">新增规则</button>
+              <button type="button" id="save-user302-config" class="primary-action">保存更改</button>
+            </div>
+          </header>
+          <section class="card">
+            <form id="user302-form">
+              <label class="emby-enable">
+                <input id="user302-enabled" type="checkbox" checked />
+                <span>启用用户302秒传</span>
+              </label>
+              <div id="user302-rules"></div>
+              <p class="hint" id="user302-save-hint"></p>
+            </form>
+          </section>
+        </section>
+      </main>
+    </div>
+    <script src="/admin/app.js"></script>
+  </body>
+</html>

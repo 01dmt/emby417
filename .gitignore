@@ -1,0 +1,17 @@
+﻿node_modules/
+dist/
+data/
+data-local/
+logs/
+.DS_Store
+# logs
+*.log
+tmp*
+# env
+.env
+.env.local
+docker-data/
+# local runtime
+Caddyfile.local
+bridge/__pycache__/
+*.pyc

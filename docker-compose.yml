@@ -1,0 +1,23 @@
+services:
+  emby-302-proxy:
+    image: 01dmt/emby417
+    container_name: emby-302-proxy
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      CANONICAL_HOST: ${CANONICAL_HOST:-127.0.0.1}
+    ports:
+      - "${WEB_UI_PORT:-8417}:8417"
+      - "5088:5088"
+      - "5089:5089"
+    volumes:
+      - ./data:/data
+
+# 使用方法：
+# 1. 创建 .env 文件
+# 2. docker compose up -d
+#
+# .env 示例：
+# WEB_UI_PORT=8417
+# CANONICAL_HOST=127.0.0.1
+# TZ=Asia/Shanghai

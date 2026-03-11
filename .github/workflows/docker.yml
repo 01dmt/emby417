@@ -1,0 +1,84 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  auto-tag:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create Next Version Tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git fetch --tags --force
+          latest_tag=$(git tag --list 'v*' --sort=-version:refname | head -n 1)
+
+          if [ -z "$latest_tag" ]; then
+            next_tag="v1.0"
+          else
+            version="${latest_tag#v}"
+            major="${version%%.*}"
+            minor="${version##*.}"
+            if ! [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]]; then
+              echo "Unsupported tag format: $latest_tag"
+              exit 1
+            fi
+            next_minor=$((minor + 1))
+            next_tag="v${major}.${next_minor}"
+          fi
+
+          echo "Creating tag: $next_tag"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$next_tag"
+          git push origin "$next_tag"
+
+  docker:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: 01dmt/emby417
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=emby417
+            org.opencontainers.image.description=Emby 302 proxy with p115client integration and admin UI
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.source=https://github.com/01dmt/emby417
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

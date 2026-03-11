@@ -510,6 +510,70 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
       }
 
       if (effectiveResolved.strategy === "prefer302") {
+        if (config.playback.allowProxy && isSafeRedirectUrl(finalDirectUrl)) {
+          const upstreamHeaders = buildUpstreamHeaders(request.headers, config);
+          const upstream = await fetch(finalDirectUrl, {
+            method: request.method,
+            headers: upstreamHeaders,
+            redirect: "manual"
+          });
+
+          if (!upstream.ok && upstream.status !== 206) {
+            const upstreamText = await upstream.text();
+            throw new Error(`proxy playback failed ${upstream.status}: ${upstreamText.slice(0, 300)}`);
+          }
+
+          timeline.mark("response", "final_response_summary", "ok", {
+            mode: "proxy",
+            status: String(upstream.status),
+            cache_no: makeCacheNo(effectiveResolved.cacheKey),
+            trace_id: traceId
+          });
+          await appendLogSafe(deps.logs, {
+            id: `${started}-${Math.random().toString(36).slice(2)}`,
+            trace_id: traceId,
+            time: new Date().toISOString(),
+            route: routePath,
+            strategy: effectiveResolved.strategy,
+            cached: effectiveResolved.cached,
+            status: upstream.status,
+            message: "代理播放成功",
+            detail: buildLogDetail({
+              request,
+              query: { ...query, UserId: requestUserId || query.UserId },
+              resolved: effectiveResolved,
+              embyHint,
+              matchedServerName,
+              transferDetail,
+              headers: normalizedHeaders,
+              directUrl: finalDirectUrl,
+              traceId,
+              events: timeline.events()
+            })
+          });
+
+          reply.hijack();
+          reply.raw.statusCode = upstream.status;
+          upstream.headers.forEach((value, key) => {
+            if (isHopByHopHeader(key)) {
+              return;
+            }
+            reply.raw.setHeader(key, value);
+          });
+
+          if (!upstream.body || request.method === "HEAD") {
+            reply.raw.end();
+            return;
+          }
+
+          const stream = Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>);
+          stream.on("error", () => {
+            reply.raw.destroy();
+          });
+          stream.pipe(reply.raw);
+          return;
+        }
+
         if (!reusableDirectCache && isSafeRedirectUrl(finalDirectUrl)) {
           const cacheTtlSeconds = getCacheExpirySecondsByCookie(config, sourceCookie);
           deps.cache.set(effectiveResolved.cacheKey, {
@@ -1071,7 +1135,10 @@ function buildUpstreamHeaders(
   if (typeof rangeValue === "string" && rangeValue.trim()) {
     result.range = rangeValue;
   }
-  if (config.p115.userAgent.trim()) {
+  const requestUserAgent = extractHeaderValue(headers["user-agent"]);
+  if (requestUserAgent && requestUserAgent.trim()) {
+    result["user-agent"] = requestUserAgent.trim();
+  } else if (config.p115.userAgent.trim()) {
     result["user-agent"] = config.p115.userAgent.trim();
   }
   const extra = parseExtraHeaders(config.p115.extraHeaders);

@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { Readable } from "node:stream";
-import type { ReadableStream as WebReadableStream } from "node:stream/web";
+import http from "node:http";
+import https from "node:https";
 import {
   AppConfig,
   PlaybackStrategy,
@@ -512,20 +512,16 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
       if (effectiveResolved.strategy === "prefer302") {
         if (config.playback.allowProxy && isSafeRedirectUrl(finalDirectUrl)) {
           const upstreamHeaders = buildUpstreamHeaders(request.headers, config);
-          const upstream = await fetch(finalDirectUrl, {
-            method: request.method,
-            headers: upstreamHeaders,
-            redirect: "manual"
-          });
+          const upstream = await openProxyStream(finalDirectUrl, request.method, upstreamHeaders);
 
-          if (!upstream.ok && upstream.status !== 206) {
-            const upstreamText = await upstream.text();
-            throw new Error(`proxy playback failed ${upstream.status}: ${upstreamText.slice(0, 300)}`);
+          if (upstream.statusCode >= 400) {
+            const upstreamText = await readNodeResponseText(upstream.response);
+            throw new Error(`proxy playback failed ${upstream.statusCode}: ${upstreamText.slice(0, 300)}`);
           }
 
           timeline.mark("response", "final_response_summary", "ok", {
             mode: "proxy",
-            status: String(upstream.status),
+            status: String(upstream.statusCode),
             cache_no: makeCacheNo(effectiveResolved.cacheKey),
             trace_id: traceId
           });
@@ -536,7 +532,7 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
             route: routePath,
             strategy: effectiveResolved.strategy,
             cached: effectiveResolved.cached,
-            status: upstream.status,
+            status: upstream.statusCode,
             message: "代理播放成功",
             detail: buildLogDetail({
               request,
@@ -553,24 +549,27 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
           });
 
           reply.hijack();
-          reply.raw.statusCode = upstream.status;
-          upstream.headers.forEach((value, key) => {
+          reply.raw.statusCode = upstream.statusCode;
+          for (const [key, value] of Object.entries(upstream.response.headers)) {
             if (isHopByHopHeader(key)) {
-              return;
+              continue;
+            }
+            if (typeof value === "undefined") {
+              continue;
             }
             reply.raw.setHeader(key, value);
-          });
+          }
 
-          if (!upstream.body || request.method === "HEAD") {
+          if (request.method === "HEAD") {
+            upstream.response.resume();
             reply.raw.end();
             return;
           }
 
-          const stream = Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>);
-          stream.on("error", () => {
+          upstream.response.on("error", () => {
             reply.raw.destroy();
           });
-          stream.pipe(reply.raw);
+          upstream.response.pipe(reply.raw);
           return;
         }
 
@@ -1208,6 +1207,41 @@ function parseExtraHeaders(raw: string): Record<string, string> {
     out[header] = value;
   }
   return out;
+}
+
+async function openProxyStream(
+  targetUrl: string,
+  method: string,
+  headers: Record<string, string>
+): Promise<{ statusCode: number; response: http.IncomingMessage }> {
+  const url = new URL(targetUrl);
+  const client = url.protocol === "https:" ? https : http;
+
+  return await new Promise((resolve, reject) => {
+    const req = client.request(url, {
+      method,
+      headers
+    }, (response) => {
+      resolve({
+        statusCode: response.statusCode || 502,
+        response
+      });
+    });
+
+    req.on("error", (error) => {
+      reject(error);
+    });
+
+    req.end();
+  });
+}
+
+async function readNodeResponseText(response: http.IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of response) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf-8");
 }
 
 function findDirectCacheHitByPathVariants(params: {

@@ -512,6 +512,55 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
       });
     }
   });
+
+  app.post("/api/p115/qr-login/start", async (request, reply) => {
+    const body = request.body as { app?: string };
+    try {
+      const result = await deps.client.startQrLogin((body?.app || "").trim() || "android");
+      reply.send({
+        ok: true,
+        sessionId: result.sessionId,
+        app: result.app,
+        uid: result.uid,
+        qrcodeUrl: result.qrcodeUrl,
+        imageDataUrl: result.imageDataUrl,
+        expiresIn: result.expiresIn
+      });
+    } catch (error) {
+      reply.status(502).send({
+        ok: false,
+        error: error instanceof Error ? error.message : "qr login start failed"
+      });
+    }
+  });
+
+  app.post("/api/p115/qr-login/poll", async (request, reply) => {
+    const body = request.body as { sessionId?: string };
+    const sessionId = (body?.sessionId || "").trim();
+    if (!sessionId) {
+      reply.status(400).send({ ok: false, error: "sessionId is required" });
+      return;
+    }
+
+    try {
+      const result = await deps.client.pollQrLogin(sessionId);
+      reply.send({
+        ok: true,
+        sessionId: result.sessionId,
+        app: result.app,
+        uid: result.uid,
+        status: result.status,
+        message: result.message,
+        cookies: result.cookies,
+        data: result.data
+      });
+    } catch (error) {
+      reply.status(502).send({
+        ok: false,
+        error: error instanceof Error ? error.message : "qr login poll failed"
+      });
+    }
+  });
 }
 
 async function countActiveEmbyUsers(config: AppConfig): Promise<number> {

@@ -2,6 +2,7 @@ import { AppConfig, EmbyServerProfile, findUser302Rule } from "./config.js";
 import { runFastTransferByPickcode } from "./fastTransfer.js";
 import { FolderIdCache } from "./mediaCache.js";
 import { P115Client } from "./p115client.js";
+import { PlaybackError, PlaybackErrorAttempt, parseErrorCodeAndReason } from "./playback_error.js";
 import { checkMediaOccupied } from "./session_checker.js";
 import { resolvePickcodeDirectLink } from "./p115_service.js";
 
@@ -73,7 +74,13 @@ export async function resolveFinalPlaybackStrategy(input: StrategyInput): Promis
           error: "target_cookie_missing"
         }
       });
-      throw new Error(`指定用户秒传失败：目标账号 ${userRule.targetCookieName} 未配置Cookie`);
+      throw new PlaybackError({
+        step: "fast_transfer",
+        accountName: userRule.targetCookieName,
+        errorCode: "COOKIE_MISSING",
+        errorReason: "未配置Cookie",
+        userMessage: `指定用户秒传失败：账号【${userRule.targetCookieName}】未配置Cookie`
+      });
     }
     const targetFileName = createUniqueTransferTargetFileName(input.sourcePath);
     const transfer = await runFastTransferByPickcode({
@@ -134,6 +141,7 @@ export async function resolveFinalPlaybackStrategy(input: StrategyInput): Promis
       });
     } else {
       const reason = transfer.error || "unknown";
+      const parsedReason = parseErrorCodeAndReason(reason);
       diagnostics.push({
         stage: "transfer",
         event: "user302_transfer",
@@ -143,7 +151,20 @@ export async function resolveFinalPlaybackStrategy(input: StrategyInput): Promis
           error: reason
         }
       });
-      throw new Error(`指定用户秒传失败：${reason}`);
+      throw new PlaybackError({
+        step: "fast_transfer",
+        accountName: userRule.targetCookieName,
+        errorCode: parsedReason.errorCode || "FAST_TRANSFER_FAILED",
+        errorReason: parsedReason.errorReason || reason,
+        userMessage: formatTransferFailureMessage(
+          "指定用户秒传失败",
+          [{
+            accountName: userRule.targetCookieName,
+            errorCode: parsedReason.errorCode || "FAST_TRANSFER_FAILED",
+            errorReason: parsedReason.errorReason || reason
+          }]
+        )
+      });
     }
   }
 
@@ -180,6 +201,7 @@ export async function resolveFinalPlaybackStrategy(input: StrategyInput): Promis
         .concat(availableTargets.slice(0, randomOffset));
       let antiRiskSucceeded = false;
       let lastError = "unknown";
+      const antiRiskFailures: PlaybackErrorAttempt[] = [];
       for (const selectedTarget of orderedTargets) {
         strategyTrail.push(`anti-risk:${selectedTarget.antiRiskName}`);
         diagnostics.push({
@@ -254,6 +276,12 @@ export async function resolveFinalPlaybackStrategy(input: StrategyInput): Promis
         }
 
         lastError = transfer.error || "unknown";
+        const parsedReason = parseErrorCodeAndReason(lastError);
+        antiRiskFailures.push({
+          accountName: selectedTarget.antiRiskName,
+          errorCode: parsedReason.errorCode || "FAST_TRANSFER_FAILED",
+          errorReason: parsedReason.errorReason || lastError
+        });
         diagnostics.push({
           stage: "transfer",
           event: "anti_risk_transfer",
@@ -266,7 +294,13 @@ export async function resolveFinalPlaybackStrategy(input: StrategyInput): Promis
       }
 
       if (!antiRiskSucceeded) {
-        throw new Error(`防风控秒传失败：所有目标账号均失败（${lastError}）`);
+        throw new PlaybackError({
+          step: "fast_transfer",
+          errorCode: antiRiskFailures[antiRiskFailures.length - 1]?.errorCode || "FAST_TRANSFER_ALL_FAILED",
+          errorReason: antiRiskFailures[antiRiskFailures.length - 1]?.errorReason || lastError,
+          attempts: antiRiskFailures,
+          userMessage: formatTransferFailureMessage("防风控秒传失败", antiRiskFailures)
+        });
       }
     }
   }
@@ -527,4 +561,16 @@ function resolveRenameMismatch(returnedName: string | undefined, requestedName: 
     return `秒传文件名未按后缀命名，期望=${requested}，实际=${returned}`;
   }
   return "";
+}
+
+function formatTransferFailureMessage(prefix: string, attempts: PlaybackErrorAttempt[]): string {
+  if (!attempts.length) {
+    return `${prefix}：未知错误`;
+  }
+  return `${prefix}：${attempts
+    .map((item) => {
+      const codeSuffix = item.errorCode ? `（${item.errorCode}）` : "";
+      return `账号【${item.accountName || "未知账号"}】${item.errorReason || "未知错误"}${codeSuffix}`;
+    })
+    .join("；")}`;
 }

@@ -2,6 +2,7 @@ import { AppConfig, EmbyServerProfile, getActiveEmbyServer, getEmbyServerById } 
 import { resolveFromEmbyRequest } from "./emby.js";
 import { MediaSourceCache } from "./mediaCache.js";
 import { P115Client } from "./p115client.js";
+import { PlaybackError } from "./playback_error.js";
 import { PlaybackRequestQuery, ParsedPlaybackRequest } from "./request_parser.js";
 import { normalizeStrmContent, readStrmContent } from "./strm.js";
 
@@ -106,7 +107,19 @@ export async function resolvePlaybackMedia(params: {
     sourceText = cached.path;
   }
   if (!sourceText) {
-    throw new Error("cannot resolve media source text from request");
+    throw new PlaybackError({
+      step: "emby_path",
+      errorCode: "EMBY_PATH_MISSING",
+      errorReason: "PlaybackInfo/ItemInfo 未返回可用 Path",
+      userMessage: "无法获取Emby path信息",
+      details: {
+        itemId: parsed.itemId,
+        mediaSourceId: parsed.mediaSourceId,
+        serverId: server.id,
+        strmPath,
+        hasStrmContent: strmContent ? "1" : "0"
+      }
+    });
   }
   diagnostics.push({
     stage: "path_parse",

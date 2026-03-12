@@ -1094,6 +1094,58 @@ button:focus-visible {
   min-width: 0;
 }
 
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.inline-action-button {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  line-height: 1.1;
+  box-shadow: none;
+  flex: 0 0 auto;
+}
+
+.inline-action-button:hover,
+.inline-action-button:active {
+  transform: none;
+}
+
+.qr-login-modal {
+  width: min(560px, 100%);
+  min-height: auto;
+}
+
+.qr-login-modal-content {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.qr-login-device-field {
+  display: grid;
+  gap: 8px;
+}
+
+.qr-login-preview {
+  display: grid;
+  place-items: center;
+  min-height: 260px;
+  border: 1px dashed rgba(208, 122, 59, 0.4);
+  border-radius: 16px;
+  background: #fff8ef;
+}
+
+.qr-login-preview img {
+  width: min(240px, 100%);
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+}
+
 .cookie-auto-delete {
   display: grid;
   gap: 10px;

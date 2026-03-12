@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import json
+import base64
 import hashlib
+import secrets
 from pathlib import Path
 from typing import Optional
+from time import time
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -79,6 +83,35 @@ class CleanupDirectoriesResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class QrLoginStartRequest(BaseModel):
+    app: str = "android"
+
+
+class QrLoginStartResponse(BaseModel):
+    ok: bool = True
+    session_id: str
+    app: str
+    uid: str
+    qrcode_url: str
+    image_data_url: str
+    expires_in: int
+
+
+class QrLoginPollRequest(BaseModel):
+    session_id: str
+
+
+class QrLoginPollResponse(BaseModel):
+    ok: bool = True
+    session_id: str
+    app: str
+    status: str
+    message: str = ""
+    cookies: str = ""
+    uid: str = ""
+    data: dict = Field(default_factory=dict)
+
+
 def _build_client() -> P115Client:
     cookie_file = os.getenv("P115_COOKIE_FILE", "").strip()
     cookie_value = os.getenv("P115_COOKIE", "").strip()
@@ -99,10 +132,73 @@ def _try_build_client() -> Optional[P115Client]:
         return None
 
 
+def _cleanup_qr_login_sessions() -> None:
+    now = int(time())
+    expired_ids = [
+        session_id
+        for session_id, session in _qr_login_sessions.items()
+        if now - int(session.get("created_at", now)) >= _QR_LOGIN_TTL_SECONDS
+    ]
+    for session_id in expired_ids:
+        _qr_login_sessions.pop(session_id, None)
+
+
+def _normalize_qr_login_app(app_name: str) -> str:
+    normalized = str(app_name or "").strip().lower()
+    if not normalized:
+        return "android"
+    aliases = {
+        "desktop": "desktop",
+        "macos": "mac",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _classify_qr_login_status(payload: dict) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        return "waiting", "等待扫码"
+    raw_message = str(payload.get("message") or payload.get("msg") or "").strip()
+    code = str(payload.get("status") or payload.get("code") or payload.get("errno") or "").strip()
+    state = payload.get("state")
+    text = f"{code} {raw_message}".lower()
+    if "expired" in text or "过期" in raw_message:
+        return "expired", raw_message or "二维码已过期"
+    if "cancel" in text or "取消" in raw_message:
+        return "canceled", raw_message or "已取消扫码登录"
+    if "scan" in text or "扫描" in raw_message or code == "1":
+        return "scanned", raw_message or "已扫码，请在设备上确认登录"
+    if "login" in text or "sign" in text or "登录" in raw_message or code in {"2", "3"}:
+        return "scanned", raw_message or "已扫码，请在设备上确认登录"
+    if state in (0, False):
+        return "waiting", raw_message or "等待扫码"
+    return "waiting", raw_message or "等待扫码"
+
+
+def _extract_login_cookies(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return ""
+    cookie_value = data.get("cookie")
+    if isinstance(cookie_value, str):
+        return cookie_value.strip()
+    if isinstance(cookie_value, dict):
+        parts = []
+        for key in ("UID", "CID", "SEID", "KID"):
+            value = str(cookie_value.get(key) or "").strip()
+            if value:
+                parts.append(f"{key}={value}")
+        return "; ".join(parts)
+    return ""
+
+
 app = FastAPI(title="p115client Bridge", version="0.1.0")
 _client: Optional[P115Client] = None
 _fs: Optional[P115FileSystem] = None
 _prefix_rules: list[tuple[str, str]] = []
+_qr_login_sessions: dict[str, dict] = {}
+_QR_LOGIN_TTL_SECONDS = 300
 
 
 @app.on_event("startup")
@@ -128,6 +224,8 @@ async def index() -> dict[str, str]:
         "download": "POST /api/tool/download",
         "fast_transfer": "POST /api/tool/fast-transfer",
         "cleanup_directories": "POST /api/tool/cleanup-directories",
+        "qr_login_start": "POST /api/tool/qr-login/start",
+        "qr_login_poll": "POST /api/tool/qr-login/poll",
     }
 
 
@@ -316,6 +414,106 @@ async def tool_cleanup_directories(
         directories=len(directories),
         recycle_cleared=recycle_cleared,
         errors=errors,
+    )
+
+
+@app.post("/api/tool/qr-login/start", response_model=QrLoginStartResponse)
+async def tool_qr_login_start(payload: QrLoginStartRequest) -> QrLoginStartResponse:
+    _cleanup_qr_login_sessions()
+    target_app = _normalize_qr_login_app(payload.app)
+    try:
+        token_response = await asyncio.wait_for(
+            asyncio.to_thread(P115Client.login_qrcode_token, app="web"),
+            timeout=10,
+        )
+        token_data = token_response["data"]
+        uid = str(token_data["uid"])
+        qrcode_url = str(token_data.get("qrcode") or f"https://115.com/scan/dg-{uid}")
+        image_bytes = await asyncio.wait_for(
+            asyncio.to_thread(P115Client.login_qrcode, uid),
+            timeout=10,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"qr login start failed: {exc}") from exc
+
+    session_id = secrets.token_urlsafe(18)
+    _qr_login_sessions[session_id] = {
+        "session_id": session_id,
+        "app": target_app,
+        "uid": uid,
+        "token": token_data,
+        "created_at": int(time()),
+    }
+    image_data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+    return QrLoginStartResponse(
+        session_id=session_id,
+        app=target_app,
+        uid=uid,
+        qrcode_url=qrcode_url,
+        image_data_url=image_data_url,
+        expires_in=_QR_LOGIN_TTL_SECONDS,
+    )
+
+
+@app.post("/api/tool/qr-login/poll", response_model=QrLoginPollResponse)
+async def tool_qr_login_poll(payload: QrLoginPollRequest) -> QrLoginPollResponse:
+    _cleanup_qr_login_sessions()
+    session_id = payload.session_id.strip()
+    session = _qr_login_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="qr login session not found or expired")
+
+    token_data = session["token"]
+    uid = str(session["uid"])
+    target_app = str(session["app"])
+
+    try:
+        status_response = await asyncio.wait_for(
+            asyncio.to_thread(P115Client.login_qrcode_scan_status, token_data),
+            timeout=8,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"qr login status failed: {exc}") from exc
+
+    status_name, status_message = _classify_qr_login_status(status_response)
+    if status_name in {"expired", "canceled"}:
+        _qr_login_sessions.pop(session_id, None)
+        return QrLoginPollResponse(
+            session_id=session_id,
+            app=target_app,
+            uid=uid,
+            status=status_name,
+            message=status_message,
+            data=status_response if isinstance(status_response, dict) else {},
+        )
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(P115Client.login_qrcode_scan_result, uid, app=target_app),
+            timeout=8,
+        )
+        cookies = _extract_login_cookies(result)
+        if cookies:
+            _qr_login_sessions.pop(session_id, None)
+            return QrLoginPollResponse(
+                session_id=session_id,
+                app=target_app,
+                uid=uid,
+                status="success",
+                message="扫码登录成功",
+                cookies=cookies,
+                data=result if isinstance(result, dict) else {},
+            )
+    except Exception:
+        pass
+
+    return QrLoginPollResponse(
+        session_id=session_id,
+        app=target_app,
+        uid=uid,
+        status=status_name,
+        message=status_message,
+        data=status_response if isinstance(status_response, dict) else {},
     )
 
 

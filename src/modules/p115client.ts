@@ -36,6 +36,26 @@ export interface P115CleanupDirectoriesResult {
   raw: unknown;
 }
 
+export interface P115QrLoginStartResult {
+  sessionId: string;
+  app: string;
+  uid: string;
+  qrcodeUrl: string;
+  imageDataUrl: string;
+  expiresIn: number;
+  raw: unknown;
+}
+
+export interface P115QrLoginPollResult {
+  sessionId: string;
+  app: string;
+  uid: string;
+  status: string;
+  message: string;
+  cookies: string;
+  data: unknown;
+}
+
 export class P115Client {
   private options: P115ClientOptions;
 
@@ -287,6 +307,60 @@ export class P115Client {
       clearTimeout(timeout);
     }
   }
+
+  async startQrLogin(appName: string): Promise<P115QrLoginStartResult> {
+    const endpoint = new URL("/api/tool/qr-login/start", this.options.baseUrl).toString();
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        app: String(appName || "").trim() || "android"
+      })
+    });
+    const text = await response.text();
+    const payload = safeParseRecord(text);
+    if (!response.ok || !payload) {
+      throw new Error(readErrorMessage(text, payload, `qr login start failed ${response.status}`));
+    }
+    return {
+      sessionId: typeof payload.session_id === "string" ? payload.session_id : "",
+      app: typeof payload.app === "string" ? payload.app : "",
+      uid: typeof payload.uid === "string" ? payload.uid : "",
+      qrcodeUrl: typeof payload.qrcode_url === "string" ? payload.qrcode_url : "",
+      imageDataUrl: typeof payload.image_data_url === "string" ? payload.image_data_url : "",
+      expiresIn: Number.isFinite(Number(payload.expires_in)) ? Number(payload.expires_in) : 300,
+      raw: payload
+    };
+  }
+
+  async pollQrLogin(sessionId: string): Promise<P115QrLoginPollResult> {
+    const endpoint = new URL("/api/tool/qr-login/poll", this.options.baseUrl).toString();
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        session_id: String(sessionId || "").trim()
+      })
+    });
+    const text = await response.text();
+    const payload = safeParseRecord(text);
+    if (!response.ok || !payload) {
+      throw new Error(readErrorMessage(text, payload, `qr login poll failed ${response.status}`));
+    }
+    return {
+      sessionId: typeof payload.session_id === "string" ? payload.session_id : "",
+      app: typeof payload.app === "string" ? payload.app : "",
+      uid: typeof payload.uid === "string" ? payload.uid : "",
+      status: typeof payload.status === "string" ? payload.status : "waiting",
+      message: typeof payload.message === "string" ? payload.message : "",
+      cookies: typeof payload.cookies === "string" ? payload.cookies : "",
+      data: payload.data
+    };
+  }
 }
 
 function waitMs(ms: number): Promise<void> {
@@ -320,6 +394,29 @@ function extractCauseCode(cause: unknown): string {
   }
   const record = cause as Record<string, unknown>;
   return typeof record.code === "string" ? record.code : "";
+}
+
+function safeParseRecord(text: string): Record<string, unknown> | null {
+  try {
+    const payload = text ? JSON.parse(text) : null;
+    return payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function readErrorMessage(
+  text: string,
+  payload: Record<string, unknown> | null,
+  fallback: string
+): string {
+  if (payload && typeof payload.detail === "string" && payload.detail.trim()) {
+    return payload.detail.trim();
+  }
+  if (payload && typeof payload.error === "string" && payload.error.trim()) {
+    return payload.error.trim();
+  }
+  return text.trim() || fallback;
 }
 
 function enrichFetchError(

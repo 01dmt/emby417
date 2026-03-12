@@ -12,6 +12,7 @@ import { CacheEntry, LinkCache, makeDirectLinkCacheKey } from "../modules/cache.
 import { RequestLogStore } from "../modules/logger.js";
 import { P115Client } from "../modules/p115client.js";
 import { FolderIdCache, MediaSourceCache } from "../modules/mediaCache.js";
+import { PlaybackError, PlaybackErrorInfo, parseErrorCodeAndReason } from "../modules/playback_error.js";
 import { parsePlaybackRequest } from "../modules/request_parser.js";
 import { resolvePlaybackMedia } from "../modules/media_resolver.js";
 import { resolveFinalPlaybackStrategy } from "../modules/pickcode_strategy.js";
@@ -164,6 +165,20 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
     let embyHint: { strmPath?: string; strmContent?: string; serverId?: string } | undefined;
     let matchedServerName = "";
     let transferDetail: Record<string, string> | undefined;
+    let currentCookieName = "";
+    let resolvedForLog:
+      | {
+        strategy: PlaybackStrategy;
+        directUrl: string;
+        cached: boolean;
+        cacheKey: string;
+        sourceText: string;
+        sourcePickcode: string;
+        cacheSourcePath: string;
+        cacheCreatedAt: string;
+        cacheHeaders: Record<string, string>;
+      }
+      | undefined;
     const emitProcessLog = async (
       message: string,
       detail: Record<string, string>,
@@ -259,6 +274,7 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
       }
       const matchedServer = mediaResolved.server;
       matchedServerName = matchedServer.name;
+      currentCookieName = matchedServer.p115CookieName || config.p115.activeCookieName;
       const expectedUserRule = findUser302Rule(config, requestUserId);
 
       timeline.mark("p115", "direct_link_resolve_start", "ok");
@@ -360,6 +376,7 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
         sourceText: mediaResolved.sourceText,
         sourcePickcode: mediaResolved.sourcePickcode || resolved.sourcePickcode
       };
+      resolvedForLog = effectiveResolved;
       const strategySourcePickcode = mediaResolved.sourcePickcode || resolved.sourcePickcode;
       if (reusableDirectCache) {
         timeline.mark("strategy", "strategy_judgement_skip", "skip", {
@@ -400,6 +417,7 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
         if (strategyResult.directUrl && isSafeRedirectUrl(strategyResult.directUrl)) {
           finalDirectUrl = strategyResult.directUrl;
         }
+        currentCookieName = strategyResult.finalCookieName;
         effectiveResolved = {
           ...effectiveResolved,
           sourcePickcode: strategyResult.finalPickcode || effectiveResolved.sourcePickcode,
@@ -412,6 +430,7 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
             "x-strategy-trail": strategyResult.strategyTrail.join("|")
           }
         };
+        resolvedForLog = effectiveResolved;
 
         const trail = strategyResult.strategyTrail.join("|");
         if (trail.includes("same-play:")) {
@@ -657,10 +676,17 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
       });
       return;
     } catch (error) {
+      const errorInfo = resolvePlaybackErrorInfo({
+        error,
+        embyHint,
+        transferDetail,
+        currentCookieName
+      });
+      const errorMessage = errorInfo?.userMessage || (error instanceof Error ? error.message : "播放失败");
       timeline.mark("response", "final_response_summary", "error", {
         mode: "error",
         status: "500",
-        error: error instanceof Error ? error.message : "playback failed",
+        error: errorMessage,
         trace_id: traceId
       });
       await appendLogSafe(deps.logs, {
@@ -671,24 +697,29 @@ export async function registerPlayRoutes(app: FastifyInstance, deps: PlayDeps) {
         strategy: query.strategy ?? config.playback.defaultStrategy,
         cached: false,
         status: 500,
-        message: error instanceof Error ? error.message : "播放失败",
+        message: errorMessage,
         detail: buildLogDetail({
           request,
           query: { ...query, UserId: requestUserId || query.UserId },
-          resolved: undefined,
+          resolved: resolvedForLog,
           embyHint,
           matchedServerName,
           transferDetail,
           headers: normalizedHeaders,
           traceId,
-          events: timeline.events()
+          events: timeline.events(),
+          errorInfo
         })
       });
       reply.status(500).send({
-        error: error instanceof Error ? error.message : "playback failed"
+        error: errorMessage
       });
-      await emitProcessLog("处理失败", {
-        "报错原因": error instanceof Error ? error.message : "playback failed"
+      await emitProcessLog(`处理失败：${errorMessage}`, {
+        "报错原因": errorMessage,
+        "失败步骤": errorInfo?.step || "",
+        "失败账号": errorInfo?.accountName || "",
+        "错误代码": errorInfo?.errorCode || "",
+        "错误原因": errorInfo?.errorReason || ""
       }, 500);
     } finally {
       gateLease.release();
@@ -854,6 +885,7 @@ function buildLogDetail(params: {
   headers: Record<string, string | undefined>;
   directUrl?: string;
   traceId: string;
+  errorInfo?: PlaybackErrorInfo;
   events?: Array<{
     trace_id: string;
     stage: string;
@@ -876,6 +908,7 @@ function buildLogDetail(params: {
   cacheSource: string;
   cacheCreatedAt: string;
   cacheHeaders: Record<string, string>;
+  errorInfo?: PlaybackErrorInfo;
   trace_summary: { trace_id: string; stage_count: number; elapsed_ms: number };
   events: Array<{
     trace_id: string;
@@ -889,7 +922,7 @@ function buildLogDetail(params: {
     data?: Record<string, string>;
   }>;
 } {
-  const { request, query, resolved, embyHint, matchedServerName, transferDetail, headers, directUrl, traceId, events } = params;
+  const { request, query, resolved, embyHint, matchedServerName, transferDetail, headers, directUrl, traceId, errorInfo, events } = params;
   const requestRaw = safeDecodeText(request.url || "");
   const itemId = extractItemIdFromPath(request.url || "") || "";
   const mediaSourceId = extractMediaSourceIdFromUrl(request.url || "") || "";
@@ -912,7 +945,22 @@ function buildLogDetail(params: {
       extracted["秒传目标账号"] = transferDetail.targetCookieName || "";
       extracted["秒传目标目录"] = transferDetail.targetPath || "";
       extracted["秒传目标Pickcode"] = transferDetail.targetPickcode || "";
+  }
+  if (errorInfo) {
+    extracted["失败步骤"] = errorInfo.step || "";
+    extracted["失败账号"] = errorInfo.accountName || "";
+    extracted["错误代码"] = errorInfo.errorCode || "";
+    extracted["错误原因"] = errorInfo.errorReason || "";
+    extracted["错误摘要"] = errorInfo.userMessage || "";
+    if (Array.isArray(errorInfo.attempts) && errorInfo.attempts.length > 0) {
+      extracted["失败账号明细"] = errorInfo.attempts
+        .map((item) => {
+          const codeSuffix = item.errorCode ? `（${item.errorCode}）` : "";
+          return `${item.accountName || "未知账号"}: ${item.errorReason || "未知错误"}${codeSuffix}`;
+        })
+        .join("；");
     }
+  }
 
   const headerSnapshot: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
@@ -935,6 +983,7 @@ function buildLogDetail(params: {
     cacheSource: resolved?.cacheSourcePath || "",
     cacheCreatedAt: resolved?.cacheCreatedAt || "",
     cacheHeaders: resolved?.cacheHeaders || {},
+    errorInfo,
     trace_summary: {
       trace_id: traceId,
       stage_count: events?.length || 0,
@@ -1270,6 +1319,81 @@ function findDirectCacheHitByPathVariants(params: {
     }
   }
   return undefined;
+}
+
+function resolvePlaybackErrorInfo(params: {
+  error: unknown;
+  embyHint?: { strmPath?: string; strmContent?: string; serverId?: string };
+  transferDetail?: Record<string, string>;
+  currentCookieName?: string;
+}): PlaybackErrorInfo | undefined {
+  if (params.error instanceof PlaybackError) {
+    return params.error.info;
+  }
+
+  const message = params.error instanceof Error
+    ? params.error.message
+    : String(params.error || "").trim();
+  if (!message) {
+    return undefined;
+  }
+
+  if (message.includes("cannot resolve media source text from request")) {
+    return {
+      step: "emby_path",
+      errorCode: "EMBY_PATH_MISSING",
+      errorReason: "PlaybackInfo/ItemInfo 未返回可用 Path",
+      userMessage: "无法获取Emby path信息",
+      details: {
+        serverId: params.embyHint?.serverId || "",
+        strmPath: params.embyHint?.strmPath || "",
+        hasStrmContent: params.embyHint?.strmContent ? "1" : "0"
+      }
+    };
+  }
+
+  if (message.includes("p115 bridge fetch failed") || message.includes("p115client error")) {
+    const parsed = parseErrorCodeAndReason(message);
+    const accountName =
+      params.transferDetail?.targetCookieName
+      || params.transferDetail?.sourceCookieName
+      || params.currentCookieName
+      || "";
+    return {
+      step: "direct_link",
+      accountName,
+      errorCode: parsed.errorCode || "DIRECT_LINK_FAILED",
+      errorReason: parsed.errorReason || "无法获取直链",
+      userMessage: formatDirectLinkFailureMessage(accountName, parsed.errorCode, parsed.errorReason || "无法获取直链")
+    };
+  }
+
+  if (message.startsWith("proxy playback failed")) {
+    const parsed = parseErrorCodeAndReason(message);
+    const accountName =
+      params.transferDetail?.targetCookieName
+      || params.transferDetail?.sourceCookieName
+      || params.currentCookieName
+      || "";
+    const reason = parsed.errorReason || message;
+    return {
+      step: "proxy_playback",
+      accountName,
+      errorCode: parsed.errorCode || "PROXY_PLAYBACK_FAILED",
+      errorReason: reason,
+      userMessage: accountName
+        ? `账号【${accountName}】代理播放失败：${reason}${parsed.errorCode ? `（${parsed.errorCode}）` : ""}`
+        : `代理播放失败：${reason}${parsed.errorCode ? `（${parsed.errorCode}）` : ""}`
+    };
+  }
+
+  return undefined;
+}
+
+function formatDirectLinkFailureMessage(accountName: string, errorCode: string, errorReason: string): string {
+  const accountLabel = accountName ? `账号【${accountName}】` : "当前账号";
+  const codeSuffix = errorCode ? `，错误代码：${errorCode}` : "";
+  return `${accountLabel}无法获取直链${codeSuffix}，原因：${errorReason}`;
 }
 
 function resolveServerFromPort(config: AppConfig, forwardedPort: string): {

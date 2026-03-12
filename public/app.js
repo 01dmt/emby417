@@ -8,7 +8,6 @@ const statusCache = document.getElementById("status-cache");
 const statusLogs = document.getElementById("status-logs");
 const statusCookies = document.getElementById("status-cookies");
 const statusUsers = document.getElementById("status-users");
-const statusTransferSuccess = document.getElementById("status-transfer-success");
 const logsContainer = document.getElementById("logs");
 const logsFilterInput = document.getElementById("logs-filter");
 const logsClearButton = document.getElementById("logs-clear");
@@ -48,6 +47,8 @@ let cacheTotal = 0;
 let cacheTtlTimer = null;
 let cachePollTimer = null;
 let pathModal = null;
+let qrLoginModal = null;
+let qrLoginPollTimer = null;
 let usersLoading = false;
 let currentCookieProfiles = [];
 let currentUser302Rules = [];
@@ -58,6 +59,14 @@ const EMBY_USERS_CACHE_KEY = "embyUsersCache:v1";
 const EMBY_USERS_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const EMBY_USERS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const EMPTY_AVATAR_DATA_URL = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='48' fill='%23d4d4d4'/%3E%3C/svg%3E";
+const QR_LOGIN_DEVICE_OPTIONS = [
+  { value: "alipaymini", label: "115生活（支付宝小程序）" },
+  { value: "web", label: "网页版" },
+  { value: "wechatmini", label: "115生活（微信小程序）" },
+  { value: "android", label: "115生活（安卓端）" },
+  { value: "ios", label: "115生活（iOS端）" },
+  { value: "tv", label: "115网盘（安卓电视）" }
+];
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -394,6 +403,227 @@ function showUrlModal(rawUrl) {
   modal.classList.remove("hidden");
 }
 
+function ensureQrLoginModal() {
+  if (qrLoginModal) {
+    return qrLoginModal;
+  }
+  const overlay = document.createElement("div");
+  overlay.className = "path-modal-overlay hidden";
+  overlay.innerHTML = `
+    <div class="path-modal qr-login-modal" role="dialog" aria-modal="true" aria-label="扫码获取 Cookies">
+      <div class="path-modal-header">
+        <strong id="qr-login-title">获取 Cookies</strong>
+        <button type="button" class="path-modal-close" data-role="close-qr-login">关闭</button>
+      </div>
+      <div class="qr-login-modal-content">
+        <label class="qr-login-device-field">
+          <span>目标设备</span>
+          <select data-role="qr-login-device"></select>
+        </label>
+        <div class="qr-login-preview">
+          <img data-role="qr-login-image" alt="115 登录二维码" />
+        </div>
+        <p class="hint" data-role="qr-login-hint"></p>
+      </div>
+      <div class="path-modal-footer">
+        <button type="button" class="path-modal-copy" data-role="start-qr-login">刷新二维码</button>
+        <button type="button" class="path-modal-close" data-role="apply-qr-cookies">回填当前卡片</button>
+      </div>
+    </div>
+  `;
+  const select = overlay.querySelector("[data-role='qr-login-device']");
+  if (select instanceof HTMLSelectElement) {
+    select.innerHTML = QR_LOGIN_DEVICE_OPTIONS
+      .map((item) => `<option value="${escapeAttribute(item.value)}">${escapeHtml(item.label)}</option>`)
+      .join("");
+    select.addEventListener("change", () => {
+      void startQrLoginFlow();
+    });
+  }
+  overlay.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    if (target === overlay || target.closest("[data-role='close-qr-login']")) {
+      closeQrLoginModal();
+      return;
+    }
+    const startButton = target.closest("[data-role='start-qr-login']");
+    if (startButton instanceof HTMLButtonElement) {
+      await startQrLoginFlow();
+      return;
+    }
+    const applyButton = target.closest("[data-role='apply-qr-cookies']");
+    if (applyButton instanceof HTMLButtonElement) {
+      applyQrLoginCookiesToCard();
+    }
+  });
+  qrLoginModal = overlay;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function closeQrLoginModal() {
+  stopQrLoginPolling();
+  const modal = ensureQrLoginModal();
+  modal.classList.add("hidden");
+}
+
+function stopQrLoginPolling() {
+  if (qrLoginPollTimer) {
+    clearTimeout(qrLoginPollTimer);
+    qrLoginPollTimer = null;
+  }
+}
+
+function openQrLoginModal(card) {
+  const modal = ensureQrLoginModal();
+  const nameInput = card?.querySelector?.("[data-role='name']");
+  const profileName = nameInput instanceof HTMLInputElement ? nameInput.value.trim() : "";
+  modal.dataset.targetCardId = card?.dataset?.id || "";
+  modal.dataset.cookies = "";
+  modal.dataset.sessionId = "";
+  modal.dataset.polling = "";
+  modal.dataset.requestId = "";
+  const title = modal.querySelector("#qr-login-title");
+  if (title instanceof HTMLElement) {
+    title.textContent = `获取 Cookies${profileName ? ` / ${profileName}` : ""}`;
+  }
+  const deviceSelect = modal.querySelector("[data-role='qr-login-device']");
+  if (deviceSelect instanceof HTMLSelectElement) {
+    deviceSelect.value = "alipaymini";
+  }
+  const image = modal.querySelector("[data-role='qr-login-image']");
+  if (image instanceof HTMLImageElement) {
+    image.removeAttribute("src");
+  }
+  const hint = modal.querySelector("[data-role='qr-login-hint']");
+  setHint(hint, "请选择目标设备，然后扫码登录。", false);
+  const applyButton = modal.querySelector("[data-role='apply-qr-cookies']");
+  setButtonBusy(applyButton, true, "等待扫码");
+  modal.classList.remove("hidden");
+  void startQrLoginFlow();
+}
+
+async function startQrLoginFlow() {
+  const modal = ensureQrLoginModal();
+  const deviceSelect = modal.querySelector("[data-role='qr-login-device']");
+  const image = modal.querySelector("[data-role='qr-login-image']");
+  const hint = modal.querySelector("[data-role='qr-login-hint']");
+  const startButton = modal.querySelector("[data-role='start-qr-login']");
+  const applyButton = modal.querySelector("[data-role='apply-qr-cookies']");
+  const app = deviceSelect instanceof HTMLSelectElement ? deviceSelect.value : "android";
+  const requestId = uid();
+  stopQrLoginPolling();
+  modal.dataset.cookies = "";
+  modal.dataset.sessionId = "";
+  modal.dataset.requestId = requestId;
+  if (image instanceof HTMLImageElement) {
+    image.removeAttribute("src");
+  }
+  setButtonBusy(applyButton, true, "等待扫码");
+  setHint(hint, "二维码生成中...", false);
+  setButtonBusy(startButton, true, "生成中...");
+  try {
+    const result = await fetchJson("/api/p115/qr-login/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ app })
+    });
+    if (modal.dataset.requestId !== requestId) {
+      return;
+    }
+    modal.dataset.sessionId = result?.sessionId || "";
+    if (image instanceof HTMLImageElement) {
+      image.src = result?.imageDataUrl || "";
+    }
+    setHint(hint, `请用 115 App 扫码，目标设备：${getQrDeviceLabel(app)}`, false);
+    scheduleQrLoginPoll();
+  } catch (error) {
+    setHint(hint, error instanceof Error ? error.message : "二维码生成失败", true);
+  } finally {
+    setButtonBusy(startButton, false, "");
+  }
+}
+
+function scheduleQrLoginPoll() {
+  stopQrLoginPolling();
+  qrLoginPollTimer = setTimeout(() => {
+    void pollQrLoginStatus();
+  }, 2000);
+}
+
+async function pollQrLoginStatus() {
+  const modal = ensureQrLoginModal();
+  if (modal.classList.contains("hidden")) {
+    stopQrLoginPolling();
+    return;
+  }
+  const sessionId = modal.dataset.sessionId || "";
+  const requestId = modal.dataset.requestId || "";
+  const hint = modal.querySelector("[data-role='qr-login-hint']");
+  const applyButton = modal.querySelector("[data-role='apply-qr-cookies']");
+  if (!sessionId) {
+    setHint(hint, "二维码会话不存在，请重新生成。", true);
+    return;
+  }
+  try {
+    const result = await fetchJson("/api/p115/qr-login/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId })
+    });
+    if (modal.dataset.requestId !== requestId || modal.dataset.sessionId !== sessionId) {
+      return;
+    }
+    if (result?.status === "success" && result?.cookies) {
+      modal.dataset.cookies = result.cookies;
+      setHint(hint, `已获取 ${getQrDeviceLabel(result.app)} Cookies，点击“回填当前卡片”即可使用。`, false);
+      setButtonBusy(applyButton, false, "");
+      return;
+    }
+    if (result?.status === "expired" || result?.status === "canceled") {
+      setHint(hint, result?.message || "二维码已失效，请重新生成。", true);
+      setButtonBusy(applyButton, true, "等待扫码");
+      return;
+    }
+    setHint(hint, result?.message || "等待扫码确认...", false);
+    scheduleQrLoginPoll();
+  } catch (error) {
+    if (modal.dataset.requestId !== requestId || modal.dataset.sessionId !== sessionId) {
+      return;
+    }
+    setHint(hint, error instanceof Error ? error.message : "扫码状态获取失败", true);
+  }
+}
+
+function applyQrLoginCookiesToCard() {
+  const modal = ensureQrLoginModal();
+  const cookies = (modal.dataset.cookies || "").trim();
+  const cardId = modal.dataset.targetCardId || "";
+  const hint = modal.querySelector("[data-role='qr-login-hint']");
+  if (!cookies || !profilesContainer) {
+    setHint(hint, "还没有可回填的 Cookies。", true);
+    return;
+  }
+  const card = profilesContainer.querySelector(`.cookie-profile[data-id="${CSS.escape(cardId)}"]`);
+  const cookiesInput = card?.querySelector?.("[data-role='cookies']");
+  const testHint = card?.querySelector?.("[data-role='test-result']");
+  if (!(cookiesInput instanceof HTMLTextAreaElement)) {
+    setHint(hint, "当前卡片不存在，请重新打开。", true);
+    return;
+  }
+  cookiesInput.value = cookies;
+  setHint(testHint, "已回填扫码获取的 Cookies，记得保存配置。", false);
+  closeQrLoginModal();
+}
+
+function getQrDeviceLabel(value) {
+  const hit = QR_LOGIN_DEVICE_OPTIONS.find((item) => item.value === value);
+  return hit ? hit.label : (value || "目标设备");
+}
+
 function formatCacheCreatedAt(rawTime) {
   if (!rawTime) {
     return "-";
@@ -621,8 +851,16 @@ function syncCachePolling() {
 function createLogDetailElement(detail) {
   const wrapper = document.createElement("div");
   wrapper.className = "log-detail";
+  const errorInfo = detail?.errorInfo && typeof detail.errorInfo === "object"
+    ? detail.errorInfo
+    : null;
 
   const detailRows = [
+    ["错误摘要", errorInfo?.userMessage || ""],
+    ["失败步骤", errorInfo?.step || ""],
+    ["失败账号", errorInfo?.accountName || ""],
+    ["错误代码", errorInfo?.errorCode || ""],
+    ["错误原因", errorInfo?.errorReason || ""],
     ["收到播放请求", detail?.requestRaw || ""],
     ["请求头", detail?.headers ? JSON.stringify(detail.headers, null, 2) : ""],
     ["提取参数", detail?.extracted ? JSON.stringify(detail.extracted, null, 2) : ""],
@@ -645,6 +883,27 @@ function createLogDetailElement(detail) {
     const valueEl = document.createElement("div");
     valueEl.className = "log-detail-value";
     valueEl.textContent = value;
+
+    row.append(keyEl, valueEl);
+    wrapper.appendChild(row);
+  }
+
+  if (Array.isArray(errorInfo?.attempts) && errorInfo.attempts.length > 0) {
+    const row = document.createElement("div");
+    row.className = "log-detail-row";
+
+    const keyEl = document.createElement("div");
+    keyEl.className = "log-detail-key";
+    keyEl.textContent = "失败账号明细";
+
+    const valueEl = document.createElement("div");
+    valueEl.className = "log-detail-value";
+    valueEl.textContent = errorInfo.attempts
+      .map((item) => {
+        const codeSuffix = item?.errorCode ? `（${item.errorCode}）` : "";
+        return `${item?.accountName || "未知账号"}：${item?.errorReason || "未知错误"}${codeSuffix}`;
+      })
+      .join("\n");
 
     row.append(keyEl, valueEl);
     wrapper.appendChild(row);
@@ -717,7 +976,10 @@ function createProfileItem(profile, isActive) {
       <input data-role="name" type="text" value="${escapeHtml(profile.name || "")}" placeholder="主账号" />
     </label>
     <label>
-      <span>Cookies</span>
+      <span class="field-label-row">
+        <span>Cookies</span>
+        <button type="button" class="inline-action-button" data-role="qr-login">获取 Cookies</button>
+      </span>
       <textarea data-role="cookies" rows="3" placeholder="UID=...; CID=...;">${escapeHtml(profile.cookies || "")}</textarea>
     </label>
     <label>
@@ -1960,9 +2222,6 @@ async function loadStatus() {
   if (statusUsers) {
     statusUsers.textContent = String(status.userCount ?? 0);
   }
-  if (statusTransferSuccess) {
-    statusTransferSuccess.textContent = String(status.fastTransferSuccessCount ?? 0);
-  }
 }
 
 function renderLogs(items) {
@@ -2962,6 +3221,12 @@ profilesContainer?.addEventListener("click", (event) => {
     card.remove();
     ensureActiveProfile();
     refreshCookieCardMeta();
+    return;
+  }
+
+  const qrLoginButton = target.closest("[data-role='qr-login']");
+  if (qrLoginButton instanceof HTMLButtonElement) {
+    openQrLoginModal(card);
     return;
   }
 
